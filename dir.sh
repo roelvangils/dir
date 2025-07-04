@@ -122,12 +122,51 @@ fi
 # Define an array of number words
 folder="$(pwd)"
 size=$(du -shc ./*(.D) | tail -n 1 | awk '{print $1}')
-summary="Found $output1 (± $size) $output2"
+summary="  Found $output1 (± $size) $output2"
 
 echo -e "\n$(_EM_ "${summary}")"
 
 # Check if node_modules folder exists and show info if it does
 if [ -d "node_modules" ]; then
     node_modules_size=$(du -sh node_modules 2>/dev/null | cut -f1)
-    echo -e "$(_EM_ "A node_modules folder (± $node_modules_size) exists but is not listed.")"
+    module_count=$(find node_modules -maxdepth 1 -type d | wc -l | tr -d '[:space:]')
+    module_count=$((module_count - 1)) # Subtract 1 to exclude the node_modules directory itself
+    echo -e "$(_EM_ "  The ")$(_A_ "file://$(pwd)/node_modules" "$(_EM_ "node_modules")")$(_EM_ " folder ($module_count modules, ±$node_modules_size) is not listed.")"
+fi
+
+# Check if this is a git repository and show git status
+if [ -d ".git" ]; then
+    untracked_count=$(git ls-files --others --exclude-standard | wc -l | tr -d '[:space:]')
+    staged_count=$(git diff --cached --name-only | wc -l | tr -d '[:space:]')
+
+    # Build the message parts
+    messages=()
+
+    # Add untracked files message if count > 0
+    if [ $untracked_count -gt 0 ]; then
+        if [ $untracked_count -eq 1 ]; then
+            messages+=("$(num_to_word $untracked_count) untracked file")
+        else
+            messages+=("$(num_to_word $untracked_count) untracked files")
+        fi
+    fi
+
+    # Add staged files message if count > 0
+    if [ $staged_count -gt 0 ]; then
+        if [ $staged_count -eq 1 ]; then
+            messages+=("$(num_to_word $staged_count) staged file")
+        else
+            messages+=("$(num_to_word $staged_count) staged files")
+        fi
+    fi
+
+    # Only display if there's something to show
+    if [ ${#messages[@]} -gt 0 ]; then
+        # Join messages with comma
+        output=$(printf "%s, " "${messages[@]}")
+        output=${output%, } # Remove trailing comma and space
+        # Capitalize the first letter
+        output="$(echo ${output:0:1} | tr '[:lower:]' '[:upper:]')${output:1}"
+        echo -e "$(_EM_ "  $output")"
+    fi
 fi
