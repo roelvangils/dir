@@ -122,7 +122,7 @@ fi
 # Define an array of number words
 folder="$(pwd)"
 size=$(du -shc ./*(.D) | tail -n 1 | awk '{print $1}')
-summary="  Found $output1 (± $size) $output2"
+summary="    Found $output1 (± $size) $output2"
 
 echo -e "\n$(_EM_ "${summary}")"
 
@@ -131,7 +131,7 @@ if [ -d "node_modules" ]; then
     node_modules_size=$(du -sh node_modules 2>/dev/null | cut -f1)
     module_count=$(find node_modules -maxdepth 1 -type d | wc -l | tr -d '[:space:]')
     module_count=$((module_count - 1)) # Subtract 1 to exclude the node_modules directory itself
-    echo -e "$(_EM_ "  The ")$(_A_ "file://$(pwd)/node_modules" "$(_EM_ "node_modules")")$(_EM_ " folder ($module_count modules, ±$node_modules_size) is not listed.")"
+    echo -e "$(_EM_ "    The ")$(_A_ "file://$(pwd)/node_modules" "$(_EM_ "node_modules")")$(_EM_ " folder ($module_count modules, ±$node_modules_size) is not listed.")"
 fi
 
 # Check if this is a git repository and show git status
@@ -167,6 +167,6 @@ if [ -d ".git" ]; then
         output=${output%, } # Remove trailing comma and space
         # Capitalize the first letter
         output="$(echo ${output:0:1} | tr '[:lower:]' '[:upper:]')${output:1}"
-        echo -e "$(_EM_ "  $output")"
+        echo -e "$(_EM_ "    $output")"
     fi
 fi
