@@ -1,6 +1,6 @@
-# dir - Enhanced Directory Listing with Time Intelligence
+# dir - Simple Enhanced Directory Listing
 
-A modern, performant Zsh utility that transforms your terminal's directory listings into beautiful, informative displays with time-based badges, git integration, and intelligent formatting.
+A Zsh script that enhances your terminal's directory listings with time-based badges, git integration, and clear formatting.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Shell](https://img.shields.io/badge/shell-zsh-green.svg)
@@ -210,7 +210,3 @@ MIT License - see [LICENSE](LICENSE) file for details.
 ## Author
 
 Created by Roel van Gils
-
----
-
-*Transforming `ls` into a modern development tool, one directory at a time.* 🚀
