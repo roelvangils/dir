@@ -2,19 +2,6 @@
 
 # dir - Optimized enhanced directory listing with eza
 
-# Check if we're in a node_modules directory
-if [[ "$(basename "$(pwd)")" == "node_modules" ]]; then
-    # Check if npm is installed
-    if ! command -v npm &>/dev/null; then
-        echo "Error: npm is not installed. Cannot list node modules." >&2
-        exit 1
-    fi
-    
-    # Run npm ls --all and exit
-    npm ls --all
-    exit 0
-fi
-
 # Exit if directory is empty
 if [[ -z "$(ls -A '.' 2>/dev/null)" ]]; then
     echo "This folder is empty."
@@ -253,12 +240,12 @@ fi
 
 # Combined find operation for file and folder counting
 if [[ -n "$glob" && "$glob" != "h" ]]; then
-    # Single find pass for both files and folders (excluding node_modules from folder count)
-    eval "$(find . -maxdepth 1 \( -type f -name "*$glob*" -not -name ".*" \) -o \( -type d -name "*$glob*" -not -name ".*" -not -path "." -not -name "node_modules" \) 2>/dev/null | \
+    # Single find pass for both files and folders
+    eval "$(find . -maxdepth 1 \( -type f -name "*$glob*" -not -name ".*" \) -o \( -type d -name "*$glob*" -not -name ".*" -not -path "." \) 2>/dev/null | \
         awk 'BEGIN{f=0;d=0} {if(system("test -f \"" $0 "\"")==0) f++; else d++} END{print "files="f"; folders="d}')"
 else
-    # Single find pass for both files and folders (excluding node_modules from folder count)
-    eval "$(find . -maxdepth 1 \( -type f -not -name ".*" \) -o \( -type d -not -name ".*" -not -path "." -not -name "node_modules" \) 2>/dev/null | \
+    # Single find pass for both files and folders
+    eval "$(find . -maxdepth 1 \( -type f -not -name ".*" \) -o \( -type d -not -name ".*" -not -path "." \) 2>/dev/null | \
         awk 'BEGIN{f=0;d=0} {if(system("test -f \"" $0 "\"")==0) f++; else d++} END{print "files="f"; folders="d}')"
 fi
 
@@ -298,11 +285,7 @@ if [[ $folders -gt 0 ]]; then
 fi
 
 # Build status message - we'll handle formatting when we print
-if [[ $files -eq 0 ]]; then
-    summary="Found $file_msg$folder_msg"
-else
-    summary="Found $file_msg (±$size)$folder_msg"
-fi
+summary="Found $file_msg (±$size)$folder_msg"
 
 # Add git status if in a repository
 if [[ -d ".git" ]]; then
@@ -346,21 +329,8 @@ echo -e "\n$(_EM_ "$summary")"
 # Add node_modules info if it exists (on new line)
 if [[ -d "node_modules" ]]; then
     node_size=$(du -sh node_modules 2>/dev/null | cut -f1)
-    
-    # Get the actual installed module count using npm
-    if command -v npm &>/dev/null; then
-        # Use npm ls --depth=0 to get only direct dependencies
-        module_count=$(npm ls --depth=0 --json 2>/dev/null | grep -o '"[^"]*": {' | wc -l | tr -d '[:space:]')
-        # If npm ls fails or returns 0, fallback to counting directories
-        if [[ -z "$module_count" ]] || [[ "$module_count" -eq 0 ]]; then
-            module_count=$(find node_modules -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d '[:space:]')
-            module_count=$((module_count - 1))
-        fi
-    else
-        # Fallback to directory counting if npm is not available
-        module_count=$(find node_modules -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d '[:space:]')
-        module_count=$((module_count - 1))
-    fi
+    module_count=$(find node_modules -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d '[:space:]')
+    module_count=$((module_count - 1))
     
     node_msg="The $(_A_ "file://$(pwd)/node_modules" "node_modules") folder ($(_NUM_ $module_count) modules, ±$node_size) is not listed."
     echo -e "$(_EM_ "$node_msg")"

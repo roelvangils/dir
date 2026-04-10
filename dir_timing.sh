@@ -1,36 +1,29 @@
 #!/bin/zsh
 
-# dir - Optimized enhanced directory listing with eza
+# dir - Simple enhanced directory listing with eza (TIMING VERSION)
 
-# Check if we're in a node_modules directory
-if [[ "$(basename "$(pwd)")" == "node_modules" ]]; then
-    # Check if npm is installed
-    if ! command -v npm &>/dev/null; then
-        echo "Error: npm is not installed. Cannot list node modules." >&2
-        exit 1
-    fi
-    
-    # Run npm ls --all and exit
-    npm ls --all
-    exit 0
-fi
+# Function to get current time in milliseconds
+get_time_ms() {
+    echo $(($(date +%s%N)/1000000))
+}
+
+# Start overall timing
+start_total=$(get_time_ms)
 
 # Exit if directory is empty
+start_empty_check=$(get_time_ms)
 if [[ -z "$(ls -A '.' 2>/dev/null)" ]]; then
     echo "This folder is empty."
     exit 0
 fi
+end_empty_check=$(get_time_ms)
+echo "Empty check: $((end_empty_check - start_empty_check))ms" >&2
 
 # Check if eza is installed
 if ! command -v eza &>/dev/null; then
     echo "Error: eza is not installed. Please install it with: brew install eza" >&2
     exit 1
 fi
-
-# Cache for git status (valid for 2 seconds)
-typeset -g GIT_CACHE_TIME=0
-typeset -g GIT_UNTRACKED_COUNT=0
-typeset -g GIT_STAGED_COUNT=0
 
 # Text formatting functions
 _EM_() {
@@ -152,34 +145,6 @@ process_eza_output() {
     fi
 }
 
-# Get git status with caching
-get_git_status() {
-    local current_time=$(date +%s)
-    local cache_age=$((current_time - GIT_CACHE_TIME))
-    
-    # If cache is fresh (less than 2 seconds old), use cached values
-    if [[ $cache_age -lt 2 ]]; then
-        return
-    fi
-    
-    # Update cache time
-    GIT_CACHE_TIME=$current_time
-    
-    # Run git commands in parallel using background jobs
-    { git ls-files --others --exclude-standard 2>/dev/null | wc -l | tr -d '[:space:]' > /tmp/git_untracked_$$ & }
-    { git diff --cached --name-only 2>/dev/null | wc -l | tr -d '[:space:]' > /tmp/git_staged_$$ & }
-    
-    # Wait for both jobs to complete
-    wait
-    
-    # Read results
-    GIT_UNTRACKED_COUNT=$(cat /tmp/git_untracked_$$ 2>/dev/null || echo "0")
-    GIT_STAGED_COUNT=$(cat /tmp/git_staged_$$ 2>/dev/null || echo "0")
-    
-    # Clean up temp files
-    rm -f /tmp/git_untracked_$$ /tmp/git_staged_$$
-}
-
 # Convert number to word (1-9)
 num_to_word() {
     case $1 in
@@ -237,47 +202,48 @@ fi
 current_time=$(date +%s)
 
 # Run eza and process output
+start_eza=$(get_time_ms)
 if [[ "$glob" == "h" ]]; then
-    eza --all "${eza_args[@]}" .* | sed 's/└/╰/g' | while IFS= read -r line; do
-        process_eza_output "$line" "$show_badges" "$current_time"
-    done
+    eza_output=$(eza --all "${eza_args[@]}" .* | sed 's/└/╰/g')
 elif [[ -n "$glob" ]]; then
-    eza "${eza_args[@]}" *"$glob"* | sed 's/└/╰/g' | while IFS= read -r line; do
-        process_eza_output "$line" "$show_badges" "$current_time"
-    done
+    eza_output=$(eza "${eza_args[@]}" *"$glob"* | sed 's/└/╰/g')
 else
-    eza "${eza_args[@]}" | sed 's/└/╰/g' | while IFS= read -r line; do
-        process_eza_output "$line" "$show_badges" "$current_time"
-    done
+    eza_output=$(eza "${eza_args[@]}" | sed 's/└/╰/g')
 fi
+end_eza=$(get_time_ms)
+echo "Eza execution: $((end_eza - start_eza))ms" >&2
 
-# Combined find operation for file and folder counting
+# Process output with badges
+start_process=$(get_time_ms)
+echo "$eza_output" | while IFS= read -r line; do
+    process_eza_output "$line" "$show_badges" "$current_time"
+done
+end_process=$(get_time_ms)
+echo "Badge processing: $((end_process - start_process))ms" >&2
+
+# Calculate statistics
+start_stats=$(get_time_ms)
 if [[ -n "$glob" && "$glob" != "h" ]]; then
-    # Single find pass for both files and folders (excluding node_modules from folder count)
-    eval "$(find . -maxdepth 1 \( -type f -name "*$glob*" -not -name ".*" \) -o \( -type d -name "*$glob*" -not -name ".*" -not -path "." -not -name "node_modules" \) 2>/dev/null | \
-        awk 'BEGIN{f=0;d=0} {if(system("test -f \"" $0 "\"")==0) f++; else d++} END{print "files="f"; folders="d}')"
+    files=$(find . -maxdepth 1 -type f -name "*$glob*" -not -name ".*" 2>/dev/null | wc -l | tr -d '[:space:]')
+    folders=$(find . -maxdepth 1 -type d -name "*$glob*" -not -name ".*" -not -path "." 2>/dev/null | wc -l | tr -d '[:space:]')
 else
-    # Single find pass for both files and folders (excluding node_modules from folder count)
-    eval "$(find . -maxdepth 1 \( -type f -not -name ".*" \) -o \( -type d -not -name ".*" -not -path "." -not -name "node_modules" \) 2>/dev/null | \
-        awk 'BEGIN{f=0;d=0} {if(system("test -f \"" $0 "\"")==0) f++; else d++} END{print "files="f"; folders="d}')"
+    files=$(find . -maxdepth 1 -type f -not -name ".*" 2>/dev/null | wc -l | tr -d '[:space:]')
+    folders=$(find . -maxdepth 1 -type d -not -name ".*" -not -path "." 2>/dev/null | wc -l | tr -d '[:space:]')
 fi
 
-# Skip size calculation for directories with few files
+# Calculate size of files only in current directory (not subdirectories)
 if [[ $files -gt 0 ]]; then
-    if [[ $files -le 3 ]]; then
-        # For small directories, just set a placeholder
-        size="<1M"
-    else
-        # Use find to get only non-hidden files and sum their sizes
-        size=$(find . -maxdepth 1 -type f -not -name ".*" -exec du -ch {} + 2>/dev/null | grep total$ | awk '{print $1}')
-        # If no total line (only one file), get the size directly
-        if [[ -z "$size" ]]; then
-            size=$(find . -maxdepth 1 -type f -not -name ".*" -exec du -h {} + 2>/dev/null | awk '{print $1}' | head -1)
-        fi
+    # Use find to get only non-hidden files and sum their sizes
+    size=$(find . -maxdepth 1 -type f -not -name ".*" -exec du -ch {} + 2>/dev/null | grep total$ | awk '{print $1}')
+    # If no total line (only one file), get the size directly
+    if [[ -z "$size" ]]; then
+        size=$(find . -maxdepth 1 -type f -not -name ".*" -exec du -h {} + 2>/dev/null | awk '{print $1}' | head -1)
     fi
 else
     size="0B"
 fi
+end_stats=$(get_time_ms)
+echo "File statistics: $((end_stats - start_stats))ms" >&2
 
 # Build summary message
 if [[ $files -eq 0 ]]; then
@@ -298,32 +264,30 @@ if [[ $folders -gt 0 ]]; then
 fi
 
 # Build status message - we'll handle formatting when we print
-if [[ $files -eq 0 ]]; then
-    summary="Found $file_msg$folder_msg"
-else
-    summary="Found $file_msg (±$size)$folder_msg"
-fi
+summary="Found $file_msg (±$size)$folder_msg"
 
 # Add git status if in a repository
+start_git=$(get_time_ms)
 if [[ -d ".git" ]]; then
-    get_git_status
+    untracked_count=$(git ls-files --others --exclude-standard 2>/dev/null | wc -l | tr -d '[:space:]')
+    staged_count=$(git diff --cached --name-only 2>/dev/null | wc -l | tr -d '[:space:]')
     
     git_msg=""
     
-    if [[ $GIT_UNTRACKED_COUNT -gt 0 ]]; then
-        if [[ $GIT_UNTRACKED_COUNT -eq 1 ]]; then
-            git_msg="$(_NUM_ $GIT_UNTRACKED_COUNT) file is untracked"
+    if [[ $untracked_count -gt 0 ]]; then
+        if [[ $untracked_count -eq 1 ]]; then
+            git_msg="$(_NUM_ $untracked_count) file is untracked"
         else
-            git_msg="$(_NUM_ $GIT_UNTRACKED_COUNT) files are untracked"
+            git_msg="$(_NUM_ $untracked_count) files are untracked"
         fi
     fi
     
-    if [[ $GIT_STAGED_COUNT -gt 0 ]]; then
+    if [[ $staged_count -gt 0 ]]; then
         staged_msg=""
-        if [[ $GIT_STAGED_COUNT -eq 1 ]]; then
-            staged_msg="$(_NUM_ $GIT_STAGED_COUNT) file is staged"
+        if [[ $staged_count -eq 1 ]]; then
+            staged_msg="$(_NUM_ $staged_count) file is staged"
         else
-            staged_msg="$(_NUM_ $GIT_STAGED_COUNT) files are staged"
+            staged_msg="$(_NUM_ $staged_count) files are staged"
         fi
         
         if [[ -n "$git_msg" ]]; then
@@ -337,6 +301,8 @@ if [[ -d ".git" ]]; then
         summary="$summary. $git_msg"
     fi
 fi
+end_git=$(get_time_ms)
+echo "Git status: $((end_git - start_git))ms" >&2
 
 # Add final period if not already there
 [[ "$summary" != *. ]] && summary="$summary."
@@ -344,24 +310,18 @@ fi
 echo -e "\n$(_EM_ "$summary")"
 
 # Add node_modules info if it exists (on new line)
+start_node=$(get_time_ms)
 if [[ -d "node_modules" ]]; then
     node_size=$(du -sh node_modules 2>/dev/null | cut -f1)
-    
-    # Get the actual installed module count using npm
-    if command -v npm &>/dev/null; then
-        # Use npm ls --depth=0 to get only direct dependencies
-        module_count=$(npm ls --depth=0 --json 2>/dev/null | grep -o '"[^"]*": {' | wc -l | tr -d '[:space:]')
-        # If npm ls fails or returns 0, fallback to counting directories
-        if [[ -z "$module_count" ]] || [[ "$module_count" -eq 0 ]]; then
-            module_count=$(find node_modules -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d '[:space:]')
-            module_count=$((module_count - 1))
-        fi
-    else
-        # Fallback to directory counting if npm is not available
-        module_count=$(find node_modules -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d '[:space:]')
-        module_count=$((module_count - 1))
-    fi
+    module_count=$(find node_modules -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d '[:space:]')
+    module_count=$((module_count - 1))
     
     node_msg="The $(_A_ "file://$(pwd)/node_modules" "node_modules") folder ($(_NUM_ $module_count) modules, ±$node_size) is not listed."
     echo -e "$(_EM_ "$node_msg")"
 fi
+end_node=$(get_time_ms)
+echo "Node modules check: $((end_node - start_node))ms" >&2
+
+# Total time
+end_total=$(get_time_ms)
+echo "TOTAL TIME: $((end_total - start_total))ms" >&2
