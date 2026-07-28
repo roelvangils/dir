@@ -1,6 +1,8 @@
-# dir - Simple Enhanced Directory Listing
+# dir — enhanced directory listing
 
-A Zsh script that enhances your terminal's directory listings with time-based badges, git integration, and clear formatting.
+A Zsh front end for [`eza`](https://github.com/eza-community/eza) that adds relative-time
+badges, a one-line summary of what's in the folder, and Git awareness — without being slow
+about it.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Shell](https://img.shields.io/badge/shell-zsh-green.svg)
@@ -8,205 +10,144 @@ A Zsh script that enhances your terminal's directory listings with time-based ba
 
 ## Why `dir`?
 
-Traditional `ls` commands give you basic file information, but navigating modern codebases requires more context. **`dir`** bridges this gap by providing:
+`eza` already lists files beautifully. `dir` adds the things you'd otherwise squint at a
+timestamp column to work out:
 
-- **⏰ Time Intelligence**: Instantly see which files were just modified with color-coded badges
-- **📊 Git Awareness**: Know how many files are untracked or staged without running `git status`
-- **🎯 Smart Filtering**: Focus on what matters with glob patterns and depth control
-- **⚡ Performance**: Optimized with caching and parallel operations for instant results
-- **🎨 Beautiful Output**: Icons, colors, and tree views that make navigation a pleasure
+- **Time badges** — `JUST NOW`, `12 MINS AGO`, `TODAY`, `YESTERDAY`, colour-coded, so the
+  file you were just editing is obvious.
+- **A summary line** — file count, folder count, total size, and how many files are
+  untracked or staged, in one sentence.
+- **`node_modules` sanity** — kept out of the listing, reported as a module count and a
+  size. Run `dir` *inside* `node_modules` and you get `npm ls` instead.
+- **Speed** — see below.
 
-## Features
+## Performance
 
-### 🏷️ Time-Based Badges
+The listing is built with zero forks per entry. `eza` is asked to render the mtime as
+`<US>epoch<US>human` via a chrono `--time-style` format, so the epoch the badges need
+arrives for free and is stripped back out with plain parameter expansion. The previous
+implementation forked `sed` and `date` for *every listed row*, and the summary ran a
+`find | awk` pipeline with a `test -f` fork per entry.
 
-See at a glance when files were last modified:
+Measured on an M5 Max (zsh 5.9, eza 0.23.5), running as a script:
 
-- 🔴 **JUST NOW** - Modified within the last minute
-- 🟠 **X MINS AGO** - Modified within the last hour
-- 🟡 **TODAY** - Modified today
-- ⚪ **YESTERDAY** - Modified yesterday
+| Case | Before | After | |
+|---|---|---|---|
+| 153-entry directory | 660 ms | 20 ms | **33×** |
+| 7,565-line `--level 3` tree | 31,400 ms | 344 ms | **91×** |
+| Summary counting alone | 380 ms | 1 ms | **380×** |
 
-### 📁 Intelligent Directory Display
-
-- Tree view with configurable depth (0-4 levels)
-- Smart handling of `node_modules` - shows module count without cluttering your view
-- Automatic detection and special handling of empty directories
-- File and folder counts with total size calculations
-
-### 🔄 Git Integration
-
-- Shows untracked and staged file counts in the summary
-- Git status caching for performance (2-second cache)
-- Seamless integration that doesn't slow down your listing
-
-### ⚙️ Performance Optimizations
-
-- Parallel execution of git commands
-- Smart size calculation (skips for small directories)
-- Combined find operations for efficiency
-- Early exit strategies for edge cases
+`./bench.zsh [PATH] [RUNS]` reproduces these and reports the `eza`-only floor alongside,
+so you can see how much of the remaining time is `eza` itself.
 
 ## Installation
 
-### Prerequisites
-
-Install `eza` (modern replacement for `ls`):
+`eza` 0.23 or newer is required:
 
 ```bash
-# macOS with Homebrew
-brew install eza
-
-# Linux/macOS with Cargo
-cargo install eza
+brew install eza          # macOS
+cargo install eza         # anywhere with Rust
 ```
 
-### Setup
+Then clone and pick one of the two ways to use it:
 
-1. Clone the repository:
 ```bash
-git clone https://github.com/roelvangils/dir.git
-cd dir
+git clone https://github.com/roelvangils/dir.git ~/repos/dir
 ```
 
-2. Make the script executable:
-```bash
-chmod +x dir.sh
+**As a shell function (recommended).** Skips starting a second `zsh` on every call, which
+is worth roughly 3 ms out of a 20 ms run:
+
+```zsh
+# ~/.zshrc
+fpath=(~/repos/dir $fpath)
+autoload -Uz dir
 ```
 
-3. Optional: Add to your PATH or create an alias:
-```bash
-# Add to ~/.zshrc
-alias dir="/path/to/dir.sh"
+**As a script.** `dir.sh` is a symlink to `dir`, so older aliases keep working:
+
+```zsh
+alias dir="~/repos/dir/dir"
 ```
 
 ## Usage
 
-### Basic Commands
+```
+dir [OPTIONS] [PATH]
+
+  -L, --level DEPTH    show a tree DEPTH levels deep (0 = flat, the default)
+  -a, --all            include hidden entries, in both the listing and counts
+  -g, --glob PATTERN   list only entries matching PATTERN
+  -B, --no-badges      disable the relative-time badges
+      --no-git         omit the per-file git status column
+      --color WHEN     always | never | auto (default: auto)
+  -h, --help           show this help
+  -V, --version        show the version
+
+PATH defaults to the current directory.
+```
 
 ```bash
-# List current directory (no tree)
-./dir.sh
-
-# Show with tree view (depth 1)
-./dir.sh 1
-
-# Show with tree view (depth 2)
-./dir.sh 2
-
-# Filter by pattern
-./dir.sh "*.txt"
-
-# Filter with specific depth
-./dir.sh "*.txt" 2
-
-# Show only hidden files
-./dir.sh h
-
-# Disable time badges
-./dir.sh --no-badges
+dir                       # the current directory
+dir ~/repos               # somewhere else
+dir --level 2             # two-level tree
+dir --glob '*.md'         # only markdown files
+dir --all                 # include dotfiles
+dir --no-badges ~/repos   # plain listing, no badges
 ```
 
-### Examples
-
-#### Quick Status Check
-```bash
-$ ./dir.sh
-```
-Shows all files with time badges, perfect for seeing what you just modified.
-
-#### Project Overview
-```bash
-$ ./dir.sh 2
-```
-Displays a 2-level tree view, ideal for understanding project structure.
-
-#### Find Specific Files
-```bash
-$ ./dir.sh "*.json"
-```
-Lists only JSON files, great for finding configurations.
-
-#### Check Hidden Files
-```bash
-$ ./dir.sh h
-```
-Shows hidden files and directories (dotfiles).
-
-## Output Example
+### Output
 
 ```
-Size Date           Name
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-7.8k 2025-01-19 14:32 📄 README.md         JUST NOW
-3.2k 2025-01-19 14:15 📄 package.json      17 MINS AGO
-1.1k 2025-01-19 09:00 📄 .gitignore        TODAY
-245B 2025-01-18 16:30 📁 src/              YESTERDAY
+Size Date Modified    Git Name
+2.6k 2026-07-28 17:33  -N 󰂺 README.md            JUST NOW
+5.7k 2026-07-28 16:58  --  dir                  35 MINS AGO
+1.1k 2026-07-28 09:12  M-  .gitignore           TODAY
+245B 2026-07-27 16:30  -- 󰉋 src                  YESTERDAY
 
-Found 3 files (±12.3k) and 1 folder. 2 files are untracked.
+Found 16 files (±95k) and 1 folder. 1 file is untracked.
 ```
 
-## Special Features
+File names are OSC-8 hyperlinks, so they're clickable in terminals that support it. The
+date column is tinted on an age gradient, which gives you a sense of recency on rows too
+old to earn a badge.
 
-### Node.js Project Awareness
+## Notes on behaviour
 
-When in a Node.js project, `dir` intelligently handles `node_modules`:
-- Excludes it from regular listings to reduce clutter
-- Shows module count and total size in the summary
-- When inside `node_modules`, automatically runs `npm ls --all`
-
-### Git Repository Integration
-
-In git repositories, the summary includes:
-- Number of untracked files
-- Number of staged files
-- Efficient caching to avoid performance impact
-
-### Smart Performance
-
-The script includes several optimizations:
-- Directories with ≤3 files skip size calculation for speed
-- Git commands run in parallel using background jobs
-- 2-second cache for git status to avoid repeated calls
-- Combined find operations reduce filesystem traversal
-
-## Configuration
-
-While `dir` works great out of the box, you can customize its behavior:
-
-- **Tree Depth**: Pass a number (0-4) to control tree view depth
-- **Time Badges**: Use `--no-badges` to disable time badges
-- **Filtering**: Use glob patterns to focus on specific files
+- **Badges use calendar days, not elapsed seconds.** A file touched at 23:50 yesterday
+  reads `YESTERDAY` (or `20 MINS AGO`) at 00:10 — not `TODAY`. Day boundaries go through
+  `mktime`, so they stay correct across a DST change.
+- **Untracked counts come from `git status --porcelain -unormal`**, which collapses an
+  untracked directory to a single entry — the same number `git status` shows you.
+- **Hidden entries are all-or-nothing.** `--all` affects the listing and the counts
+  together, so the summary can't contradict what's on screen.
+- `--no-optional-locks` is passed to Git so a listing never rewrites the index underneath
+  a running editor or language server.
 
 ## Requirements
 
-- **Shell**: Zsh (uses Zsh-specific features)
-- **Dependencies**: `eza` must be installed
-- **Optional**: `npm` for enhanced Node.js project support
-- **Optional**: `git` for repository status integration
+- **zsh** — the script uses zsh-only features throughout.
+- **eza** ≥ 0.23. Older versions that reject a `+FORMAT` time style still work; you just
+  don't get badges.
+- **git** and **npm** are optional; their sections are skipped when absent.
 
-## Why Not Just Use `eza` Directly?
+## Development
 
-While `eza` is excellent, `dir` adds:
+```bash
+zsh ./test.zsh      # 24 assertions
+zsh -n dir          # syntax check
+zsh ./bench.zsh     # benchmarks
+```
 
-1. **Time intelligence** - Color-coded badges for recent changes
-2. **Smart summaries** - File counts, sizes, and git status
-3. **Special handling** - Intelligent treatment of node_modules
-4. **Performance** - Caching and optimizations for large directories
-5. **Convenience** - Sensible defaults and shortcuts
-
-## Contributing
-
-Contributions are welcome! Feel free to:
-
-- Report bugs or request features via [issues](https://github.com/roelvangils/dir/issues)
-- Submit pull requests with improvements
-- Share your usage experiences and suggestions
+The central test is a byte-identity gate: with no recent files, `dir`'s reconstructed
+output must be byte-for-byte identical to a plain `eza --time-style=long-iso` run, across
+flat/tree/colour/`--git`/`--all` combinations. If a future change breaks the column
+arithmetic, that test fails first.
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+MIT — see [LICENSE](LICENSE).
 
 ## Author
 
-Created by Roel van Gils
+Created by Roel Van Gils.

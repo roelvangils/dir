@@ -1,0 +1,421 @@
+#!/usr/bin/env zsh
+#
+# dir — a fast, informative directory listing built on eza.
+#
+# Usable two ways:
+#
+#   as a script     ./dir [OPTIONS] [PATH]
+#   as a function   fpath=(/path/to/this/repo $fpath); autoload -Uz dir
+#
+# The autoload form avoids starting a second zsh interpreter on every call,
+# which is worth ~3 ms out of a ~13 ms run.
+#
+# Performance note: the whole design exists to keep the per-entry cost at zero
+# forks. eza is asked to print the mtime as `<US>epoch<US>human` via a chrono
+# --time-style format, so the epoch needed for the time badges arrives for
+# free and is stripped back out with plain parameter expansion. The previous
+# implementation forked `sed` and `date` per listed row.
+
+typeset -g DIR_VERSION='2.0.0'
+
+# ASCII Unit Separator. Safe as a field delimiter because eza escapes control
+# characters that occur in file names, so the only U+001F bytes on a line are
+# the pair chrono emits around the epoch.
+typeset -g DIR_SEP=$'\x1f'
+
+dir::usage() {
+  print -r -- "dir ${DIR_VERSION} — enhanced directory listing
+
+Usage: dir [OPTIONS] [PATH]
+
+Options:
+  -L, --level DEPTH    show a tree DEPTH levels deep (0 = flat, the default)
+  -a, --all            include hidden entries, in both the listing and counts
+  -g, --glob PATTERN   list only entries matching PATTERN
+  -B, --no-badges      disable the relative-time badges
+      --no-git         omit the per-file git status column
+      --color WHEN     always | never | auto (default: auto)
+  -h, --help           show this help
+  -V, --version        show the version
+
+PATH defaults to the current directory."
+}
+
+# Format a byte count into REPLY, e.g. 1536 -> 1.5k
+dir::human() {
+  local -F bytes=$1
+  local -a units=(B k M G T P)
+  integer i=1
+  while (( bytes >= 1024 && i < $#units )); do
+    (( bytes /= 1024 ))
+    (( i++ ))
+  done
+  if (( i == 1 )); then
+    REPLY="${1}B"
+  elif (( bytes < 10 )); then
+    printf -v REPLY '%.1f%s' $bytes $units[i]
+  else
+    printf -v REPLY '%.0f%s' $bytes $units[i]
+  fi
+}
+
+dir() {
+  emulate -L zsh
+
+  zmodload -F zsh/datetime b:strftime p:EPOCHSECONDS 2>/dev/null
+  zmodload -F zsh/stat b:zstat 2>/dev/null
+
+  # ---------------------------------------------------------------- arguments
+  integer all=0 badges=1 want_git=1
+  # Kept as a string until validated: assigning to an integer would silently
+  # arithmetic-evaluate a word like `x` to 0 instead of rejecting it.
+  local depth_raw='0'
+  local pattern='' color='auto' target=''
+
+  while (( $# )); do
+    case $1 in
+      -L|--level)           depth_raw=${2-}; shift 2 ;;
+      -L*)                  depth_raw=${1#-L}; shift ;;
+      --level=*)            depth_raw=${1#*=}; shift ;;
+      -a|--all)             all=1; shift ;;
+      -g|--glob)            pattern=${2-}; shift 2 ;;
+      --glob=*)             pattern=${1#*=}; shift ;;
+      -B|--no-badges)       badges=0; shift ;;
+      --no-git)             want_git=0; shift ;;
+      --color|--colour)     color=${2-}; shift 2 ;;
+      --color=*|--colour=*) color=${1#*=}; shift ;;
+      -h|--help)            dir::usage; return 0 ;;
+      -V|--version)         print -r -- "dir ${DIR_VERSION}"; return 0 ;;
+      --)                   shift; break ;;
+      -*)                   print -ru2 -- "dir: unknown option: $1"
+                            print -ru2 -- "try 'dir --help'"
+                            return 2 ;;
+      *)                    break ;;
+    esac
+  done
+
+  if [[ $depth_raw != <-> ]]; then
+    print -ru2 -- "dir: --level needs a non-negative integer, got '$depth_raw'"
+    return 2
+  fi
+  integer depth=$depth_raw
+
+  if (( $# > 1 )); then
+    print -ru2 -- "dir: expected at most one PATH, got $#"
+    return 2
+  fi
+  target=${1:-.}
+  target=${target%/}
+  [[ -z $target ]] && target=/
+
+  if [[ ! -d $target ]]; then
+    print -ru2 -- "dir: not a directory: $target"
+    return 1
+  fi
+
+  # ------------------------------------------------------------ special cases
+  # Inside a node_modules tree the file listing is noise; npm's own view is
+  # what anyone actually wants.
+  if [[ ${target:A:t} == node_modules ]]; then
+    if (( ! $+commands[npm] )); then
+      print -ru2 -- "dir: npm is not installed, cannot list node modules"
+      return 1
+    fi
+    npm ls --all --prefix $target/..
+    return $?
+  fi
+
+  if (( ! $+commands[eza] )); then
+    print -ru2 -- "dir: eza is not installed. Install it with: brew install eza"
+    return 1
+  fi
+
+  integer use_color=0
+  case $color in
+    always) use_color=1 ;;
+    never)  use_color=0 ;;
+    auto)   [[ -t 1 && -z ${NO_COLOR-} ]] && use_color=1 ;;
+    *)      print -ru2 -- "dir: --color takes always, never or auto"; return 2 ;;
+  esac
+
+  # ------------------------------------------------- background work, started
+  # early so it overlaps the eza run instead of being serialised after it.
+  integer gitfd=0 nmfd=0
+  # Unconditional: --no-git only suppresses eza's per-file column, the summary
+  # still reports untracked/staged counts. Running it costs nothing here
+  # because it overlaps eza. --no-optional-locks keeps it from rewriting the
+  # index underneath a concurrent editor or language server.
+  exec {gitfd}< <(git --no-optional-locks -C $target status --porcelain=v1 -unormal -- . 2>/dev/null)
+  if [[ -d $target/node_modules ]]; then
+    exec {nmfd}< <(du -sk $target/node_modules 2>/dev/null)
+  fi
+
+  {
+    # ------------------------------------------------------- counts and sizes
+    # Glob qualifiers do in the shell what the old code paid a find|awk
+    # pipeline (and one `test -f` fork per entry) to do.
+    local pat=${pattern:-*}
+    local -a entry_files entry_dirs
+    if (( all )); then
+      entry_files=( $target/${~pat}(D.N) )
+      entry_dirs=(  $target/${~pat}(D/N) )
+    else
+      entry_files=( $target/${~pat}(.N) )
+      entry_dirs=(  $target/${~pat}(/N) )
+    fi
+    entry_dirs=( ${entry_dirs:#*/node_modules} )
+
+    if (( ${#entry_files} == 0 && ${#entry_dirs} == 0 )); then
+      if [[ -n $pattern ]]; then
+        print -ru2 -- "dir: nothing matches '$pattern'"
+        return 1
+      fi
+      print -r -- "This folder is empty."
+      return 0
+    fi
+
+    # -------------------------------------------------------------- eza setup
+    local -a eza_args=(
+      --long --header --icons=always --no-user --no-permissions
+      --group-directories-first --sort modified
+      --ignore-glob='node_modules|.DS_Store'
+      --hyperlink=always
+      --color-scale=age --color-scale-mode=gradient
+    )
+    if (( use_color )); then
+      eza_args+=( --colour=always )
+    else
+      eza_args+=( --colour=never )
+    fi
+    (( want_git )) && eza_args+=( --git )
+    (( all ))      && eza_args+=( --all )
+    (( depth > 0 )) && eza_args+=( --tree --level $depth )
+
+    # eza prints nothing when given no path operand and stdin is not a tty, so
+    # every code path below passes an explicit operand.
+    local -a targets
+    if [[ -n $pattern ]]; then
+      if (( all )); then
+        targets=( $target/${~pat}(DN) )
+      else
+        targets=( $target/${~pat}(N) )
+      fi
+      # Without this eza descends into every matched directory and prints
+      # group headers instead of listing the matches as rows.
+      (( depth == 0 )) && eza_args+=( --treat-dirs-as-files )
+    else
+      targets=( $target )
+    fi
+
+    # --------------------------------------------------------------- listing
+    if (( ! badges )); then
+      eza $eza_args --time-style=long-iso -- $targets || return 1
+    else
+      local raw
+      raw=$(eza $eza_args --time-style="+${DIR_SEP}%s${DIR_SEP}%Y-%m-%d %H:%M" -- $targets 2>/dev/null)
+      integer rc=$?
+      local -a lines=( "${(@f)raw}" )
+
+      if (( rc != 0 || ${#lines} == 0 )); then
+        # Older eza, or one that rejects a chrono +FORMAT: fall back to a
+        # plain listing and simply go without badges.
+        eza $eza_args --time-style=long-iso -- $targets || return 1
+      else
+        # Calendar-day boundaries, not "86400 seconds ago". strftime -r goes
+        # through mktime, so both are correct across a DST change.
+        integer now=$EPOCHSECONDS midnight=0 ymidnight=0
+        local day
+        strftime -s day '%Y-%m-%d' $now
+        strftime -rs midnight '%Y-%m-%d %H:%M:%S' "$day 00:00:00"
+        strftime -s day '%Y-%m-%d' $(( now - 86400 ))
+        strftime -rs ymidnight '%Y-%m-%d %H:%M:%S' "$day 00:00:00"
+
+        local B_NOW=$'\e[38;5;196;107m\e[1m JUST NOW \e[0m'
+        local B_TODAY=$'\e[38;5;226;40m\e[1m TODAY \e[0m'
+        local B_YEST=$'\e[38;5;244;107m\e[1m YESTERDAY \e[0m'
+        local B_MINL=$'\e[38;5;214;40m\e[1m ' B_MINR=$' \e[0m'
+        local -a minword=(MIN MINS)
+        if (( ! use_color )); then
+          B_NOW=' [JUST NOW]'; B_TODAY=' [TODAY]'; B_YEST=' [YESTERDAY]'
+          B_MINL=' ['; B_MINR=']'
+        fi
+
+        local -a out=() undated=()
+        local line prefix rest epoch
+        integer strip=0 age mins
+        for line in $lines; do
+          # The header, blank lines, and rows whose timestamp eza could not
+          # render (it prints a bare `-`, e.g. for an mtime of 0) carry no
+          # separator. They still sit in an over-wide Date column, so remember
+          # where they are and re-pad them once `strip` is known.
+          if [[ $line != *$DIR_SEP* ]]; then
+            out+=( $line )
+            undated+=( ${#out} )
+            continue
+          fi
+          prefix=${line%%$DIR_SEP*}
+          rest=${line#*$DIR_SEP}
+          epoch=${rest%%$DIR_SEP*}
+          (( strip )) || strip=$(( ${#epoch} + 2 ))
+          line="${prefix}${rest#*$DIR_SEP}"
+
+          if [[ $epoch == <-> ]] && (( epoch >= ymidnight )); then
+            (( age = now - epoch ))
+            (( age < 0 )) && age=0
+            if (( age < 60 )); then
+              line+=" $B_NOW"
+            elif (( age < 3600 )); then
+              (( mins = age / 60 ))
+              line+=" ${B_MINL}${mins} ${minword[$(( (mins != 1) + 1 ))]} AGO${B_MINR}"
+            elif (( epoch >= midnight )); then
+              line+=" $B_TODAY"
+            else
+              line+=" $B_YEST"
+            fi
+          fi
+          out+=( $line )
+        done
+
+        # eza sizes the Date column to the widest rendered value, so removing
+        # the epoch from the data rows leaves every row we did not touch
+        # over-padded by exactly `strip`. Collapsing the first run of
+        # `strip + 1` spaces removes exactly that much: no other run in these
+        # rows is longer than a single-space column separator, and the Date
+        # column always precedes the file name.
+        if (( strip )); then
+          local run=${(l:$(( strip + 1 )):: :)}
+          integer idx
+          for idx in $undated; do
+            out[idx]=${out[idx]/$run/ }
+          done
+        fi
+
+        # Per-element substitution is measurably faster here than one pass
+        # over the joined string. Do not "optimise" this into ${joined//…}.
+        (( depth > 0 )) && out=( ${out//└/╰} )
+
+        (( ${#out} )) && print -r -- ${(F)out}
+      fi
+    fi
+
+    # --------------------------------------------------------------- summary
+    local EM='' EM_OFF='' NUM='' NUM_OFF=''
+    if (( use_color )); then
+      EM=$'\e[3;90m'; EM_OFF=$'\e[0m'; NUM=$'\e[97m'; NUM_OFF=$'\e[3;90m'
+    fi
+
+    local size_str=''
+    if (( ${#entry_files} && $+builtins[zstat] )); then
+      local -a sizes
+      zstat -A sizes +size -- $entry_files 2>/dev/null
+      integer total=0
+      local one
+      for one in $sizes; do (( total += one )); done
+      dir::human $total
+      size_str=$REPLY
+    fi
+
+    local file_msg folder_msg summary
+    case ${#entry_files} in
+      0) file_msg='no files' ;;
+      1) file_msg='just one file' ;;
+      *) file_msg="${NUM}${#entry_files}${NUM_OFF} files" ;;
+    esac
+    case ${#entry_dirs} in
+      0) folder_msg='' ;;
+      1) folder_msg=' and just one folder' ;;
+      *) folder_msg=" and ${NUM}${#entry_dirs}${NUM_OFF} folders" ;;
+    esac
+
+    if [[ -n $size_str ]]; then
+      summary="Found ${file_msg} (±${size_str})${folder_msg}"
+    else
+      summary="Found ${file_msg}${folder_msg}"
+    fi
+
+    # ------------------------------------------------------------ git status
+    integer untracked=0 staged=0
+    if (( gitfd )); then
+      local gline
+      while IFS= read -r -u $gitfd gline; do
+        case $gline in
+          '??'*)      (( untracked++ )) ;;
+          [MADRCTU]*) (( staged++ )) ;;
+        esac
+      done
+      exec {gitfd}<&-
+      gitfd=0
+    fi
+
+    local git_msg=''
+    if (( untracked )); then
+      if (( untracked == 1 )); then
+        git_msg="${NUM}1${NUM_OFF} file is untracked"
+      else
+        git_msg="${NUM}${untracked}${NUM_OFF} files are untracked"
+      fi
+    fi
+    if (( staged )); then
+      local staged_msg
+      if (( staged == 1 )); then
+        staged_msg="${NUM}1${NUM_OFF} file is staged"
+      else
+        staged_msg="${NUM}${staged}${NUM_OFF} files are staged"
+      fi
+      if [[ -n $git_msg ]]; then
+        git_msg="${git_msg} and ${staged_msg}"
+      else
+        git_msg=$staged_msg
+      fi
+    fi
+    [[ -n $git_msg ]] && summary="${summary}. ${git_msg}"
+    [[ $summary != *. ]] && summary="${summary}."
+
+    print -r -- ''
+    print -r -- "${EM}${summary}${EM_OFF}"
+
+    # --------------------------------------------------------- node_modules
+    if (( nmfd )); then
+      local nm_size='?' du_line
+      if IFS= read -r -u $nmfd du_line; then
+        dir::human $(( ${du_line%%[[:space:]]*} * 1024 ))
+        nm_size=$REPLY
+      fi
+      exec {nmfd}<&-
+      nmfd=0
+
+      # Count what is installed rather than asking npm: `npm ls --depth=0
+      # --json` took 300-800 ms and the old grep counted every nested JSON
+      # key, not modules. @scope directories are containers, so count their
+      # children instead of themselves.
+      local -a top=( $target/node_modules/*(/N) ) scoped
+      integer modules=0
+      local entry
+      for entry in $top; do
+        case ${entry:t} in
+          .bin|.cache|.package-lock.json|.modules.yaml) ;;
+          @*) scoped=( $entry/*(/N) ); (( modules += ${#scoped} )) ;;
+          *)  (( modules++ )) ;;
+        esac
+      done
+
+      local nm_path=${target:A}/node_modules
+      local link="${nm_path}"
+      if (( use_color )); then
+        link=$'\e]8;;file://'"${nm_path}"$'\e\\'"node_modules"$'\e]8;;\e\\'
+      else
+        link='node_modules'
+      fi
+      print -r -- "${EM}The ${link} folder (${NUM}${modules}${NUM_OFF} modules, ±${nm_size}) is not listed.${EM_OFF}"
+    fi
+  } always {
+    (( gitfd )) && exec {gitfd}<&-
+    (( nmfd ))  && exec {nmfd}<&-
+  }
+}
+
+# Run when invoked as a script, and on the first call when loaded with
+# `autoload -Uz dir`. Sourcing the file merely defines the function.
+if [[ -n ${ZSH_SCRIPT-} || ${zsh_eval_context[-1]} == loadautofunc ]]; then
+  dir "$@"
+fi
