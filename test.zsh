@@ -133,6 +133,81 @@ out=$( cd $TMP/plain && zsh $DIR --color=never )
 [[ $out == *a.txt* ]] && ok 'defaults to cwd' || nope 'defaults to cwd' "$out"
 
 print -r -- ''
+print -r -- 'bare-word filters'
+
+# fixtures for the filter tests
+mkdir -p $TMP/filt/adir $TMP/filt/.hdir
+print -r -- 'small' > $TMP/filt/small.txt
+print -r -- 'x' > $TMP/filt/.hidden.txt
+mkdir -p $TMP/filt/needle-dir
+print -r -- 'y' > $TMP/filt/has-needle.txt
+# 3 MiB, so it passes 1m and 2m but not 10m
+dd if=/dev/zero of=$TMP/filt/big.bin bs=1048576 count=3 status=none 2>/dev/null \
+  || head -c 3145728 /dev/zero > $TMP/filt/big.bin
+touch -t 202001010000 $TMP/filt/small.txt $TMP/filt/big.bin
+
+names_of() { print -rl -- ${(f)"$(zsh $DIR --color=never --no-badges "$@" $TMP/filt)"} }
+
+has()    { local n=$1 hay=$2 ndl=$3; [[ $hay == *$ndl* ]] && ok $n || nope $n "$hay" }
+hasnt()  { local n=$1 hay=$2 ndl=$3; [[ $hay != *$ndl* ]] && ok $n || nope $n "$hay" }
+
+out=$(names_of h)
+has   'h lists hidden'            $out '.hidden.txt'
+hasnt 'h excludes visible'        $out 'small.txt'
+
+out=$(names_of d)
+has   'd lists folders'           $out 'adir'
+hasnt 'd excludes files'          $out 'small.txt'
+
+out=$(names_of f)
+has   'f lists files'             $out 'small.txt'
+hasnt 'f excludes folders'        $out 'adir'
+
+out=$(names_of 1m)
+has   '1m keeps a 3 MiB file'     $out 'big.bin'
+hasnt '1m drops a small file'     $out 'small.txt'
+
+out=$(names_of 10m 2>&1)
+hasnt '10m drops the 3 MiB file'  $out 'big.bin'
+
+out=$(names_of needle)
+has   'word matches a file'       $out 'has-needle.txt'
+has   'word matches a folder'     $out 'needle-dir'
+hasnt 'word excludes non-matches' $out 'small.txt'
+
+# stacking
+out=$(names_of f needle)
+has   'f + word keeps the file'   $out 'has-needle.txt'
+hasnt 'f + word drops the folder' $out 'needle-dir'
+
+out=$(names_of d 1m 2>&1)
+hasnt 'd + 1m drops the big file' $out 'big.bin'
+
+# m / n reflect today; the backdated files must not appear
+: > $TMP/filt/fresh.log
+out=$(names_of m)
+has   'm lists a file from today' $out 'fresh.log'
+hasnt 'm drops a backdated file'  $out 'small.txt'
+
+out=$(names_of n)
+has   'n lists a file from today' $out 'fresh.log'
+
+# order does not matter
+a=$(names_of f needle); b=$(names_of needle f)
+assert_eq 'filter order is irrelevant' $a $b
+
+# conflicting filters, and a filter that matches nothing
+zsh $DIR --color=never d f $TMP/filt >/dev/null 2>&1
+(( $? == 2 )) && ok "'d f' is rejected" || nope "'d f' is rejected"
+zsh $DIR --color=never 999g $TMP/filt >/dev/null 2>&1
+(( $? == 1 )) && ok 'no matches exits 1' || nope 'no matches exits 1'
+
+# a filter word still wins over a directory of the same name
+mkdir -p $TMP/filt/h
+out=$(names_of h)
+hasnt 'filter word beats a dir named h' $out 'small.txt'
+
+print -r -- ''
 print -r -- 'cli'
 
 zsh $DIR --help >/dev/null && ok '--help exits 0' || nope '--help exits 0'

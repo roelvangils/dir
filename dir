@@ -16,7 +16,7 @@
 # free and is stripped back out with plain parameter expansion. The previous
 # implementation forked `sed` and `date` per listed row.
 
-typeset -g DIR_VERSION='2.0.0'
+typeset -g DIR_VERSION='2.1.0'
 
 # ASCII Unit Separator. Safe as a field delimiter because eza escapes control
 # characters that occur in file names, so the only U+001F bytes on a line are
@@ -26,19 +26,35 @@ typeset -g DIR_SEP=$'\x1f'
 dir::usage() {
   print -r -- "dir ${DIR_VERSION} — enhanced directory listing
 
-Usage: dir [OPTIONS] [PATH]
+Usage: dir [OPTIONS] [FILTER...] [PATH]
+
+Filters — bare words, in any order, combined with AND:
+  h                    only hidden entries
+  d                    only folders
+  f                    only files
+  n                    only entries created today
+  m                    only entries modified today
+  500k  1m  2g         only entries larger than that (k/m/g, powers of 1024)
+  WORD                 only names containing WORD
 
 Options:
   -L, --level DEPTH    show a tree DEPTH levels deep (0 = flat, the default)
   -a, --all            include hidden entries, in both the listing and counts
-  -g, --glob PATTERN   list only entries matching PATTERN
+  -g, --glob PATTERN   list only entries whose name matches PATTERN
   -B, --no-badges      disable the relative-time badges
       --no-git         omit the per-file git status column
       --color WHEN     always | never | auto (default: auto)
   -h, --help           show this help
   -V, --version        show the version
 
-PATH defaults to the current directory."
+Examples:
+  dir h                hidden entries
+  dir d 10m            folders over 10 MiB
+  dir f n              files created today
+  dir h config         hidden entries whose name contains 'config'
+
+PATH defaults to the current directory. A directory named like a filter word
+is only reachable as a path when written as ./h, or listed with --glob h."
 }
 
 # Format a byte count into REPLY, e.g. 1536 -> 1.5k
@@ -56,6 +72,19 @@ dir::human() {
     printf -v REPLY '%.1f%s' $bytes $units[i]
   else
     printf -v REPLY '%.0f%s' $bytes $units[i]
+  fi
+}
+
+# Run eza, optionally from inside a directory. When we pass individual entries
+# as operands, eza echoes each name exactly as we wrote it, so running from the
+# target directory is what keeps rows showing `README.md` rather than the whole
+# path we used to reach it. The cd is confined to a subshell.
+dir::run_eza() {
+  local wd=$1; shift
+  if [[ -n $wd ]]; then
+    ( builtin cd -q -- $wd && command eza "$@" )
+  else
+    command eza "$@"
   fi
 }
 
@@ -100,11 +129,49 @@ dir() {
   fi
   integer depth=$depth_raw
 
-  if (( $# > 1 )); then
-    print -ru2 -- "dir: expected at most one PATH, got $#"
+  # ------------------------------------------------------ bare-word filters
+  # Single letters and size words, in any order, ANDed together. A word that
+  # matches none of them is a path if it names a directory, otherwise a
+  # substring to search for. Filter words win over paths, so a directory
+  # called `h` needs ./h or --glob h.
+  integer only_hidden=0 only_dirs=0 only_files=0 new_today=0 mod_today=0
+  integer min_size=0 sz
+  local name_sub='' word
+  for word in "$@"; do
+    case $word in
+      h) only_hidden=1 ;;
+      d) only_dirs=1 ;;
+      f) only_files=1 ;;
+      n) new_today=1 ;;
+      m) mod_today=1 ;;
+      <->[kKmMgG])
+        sz=${word[1,-2]}
+        case ${word[-1]:l} in
+          k) (( min_size = sz * 1024 )) ;;
+          m) (( min_size = sz * 1024 ** 2 )) ;;
+          g) (( min_size = sz * 1024 ** 3 )) ;;
+        esac ;;
+      *)
+        if [[ -z $target && -d $word ]]; then
+          target=$word
+        elif [[ -d $word ]]; then
+          print -ru2 -- "dir: expected at most one PATH"
+          return 2
+        elif [[ -z $name_sub ]]; then
+          name_sub=$word
+        else
+          print -ru2 -- "dir: unexpected argument: $word"
+          return 2
+        fi ;;
+    esac
+  done
+
+  if (( only_dirs && only_files )); then
+    print -ru2 -- "dir: 'd' and 'f' cannot be combined"
     return 2
   fi
-  target=${1:-.}
+
+  target=${target:-.}
   target=${target%/}
   [[ -z $target ]] && target=/
 
@@ -130,6 +197,16 @@ dir() {
     return 1
   fi
 
+  # Calendar-day boundaries, shared by the `n`/`m` filters and the badges.
+  # strftime -r goes through mktime, so these stay correct across a DST change
+  # in a way that `now - 86400` does not.
+  integer now=$EPOCHSECONDS midnight=0 ymidnight=0
+  local _day
+  strftime -s _day '%Y-%m-%d' $now
+  strftime -rs midnight '%Y-%m-%d %H:%M:%S' "$_day 00:00:00"
+  strftime -s _day '%Y-%m-%d' $(( now - 86400 ))
+  strftime -rs ymidnight '%Y-%m-%d %H:%M:%S' "$_day 00:00:00"
+
   integer use_color=0
   case $color in
     always) use_color=1 ;;
@@ -151,23 +228,80 @@ dir() {
   fi
 
   {
-    # ------------------------------------------------------- counts and sizes
+    # ----------------------------------------------------------- selection
     # Glob qualifiers do in the shell what the old code paid a find|awk
     # pipeline (and one `test -f` fork per entry) to do.
-    local pat=${pattern:-*}
-    local -a entry_files entry_dirs
-    if (( all )); then
-      entry_files=( $target/${~pat}(D.N) )
-      entry_dirs=(  $target/${~pat}(D/N) )
+    integer filtering=0
+    (( only_hidden || only_dirs || only_files || new_today || mod_today || min_size )) && filtering=1
+    [[ -n $pattern || -n $name_sub ]] && filtering=1
+
+    local -a entry_files entry_dirs selected
+    local entry
+
+    if (( filtering )); then
+      if (( only_hidden )); then
+        selected=( $target/.*(N) )        # zsh's .* excludes . and ..
+      elif (( all )); then
+        selected=( $target/*(DN) )
+      else
+        selected=( $target/*(N) )
+      fi
+
+      # Metadata for the whole candidate set in two builtin calls rather than
+      # one per entry.
+      local -a c_size c_mtime
+      if (( ${#selected} )); then
+        zstat -A c_size  +size  -- $selected 2>/dev/null
+        zstat -A c_mtime +mtime -- $selected 2>/dev/null
+      fi
+
+      # Birth time is not one of zstat's fields, so `n` costs a single stat
+      # call over the whole candidate set. GNU stat does not take -f; there
+      # we fall back to modified-today, which is the closest portable answer.
+      local -A born
+      if (( new_today && ${#selected} )); then
+        local bline
+        for bline in ${(f)"$(stat -f '%B %N' -- $selected 2>/dev/null)"}; do
+          [[ $bline == <->\ * ]] && born[${bline#* }]=${bline%% *}
+        done
+        if (( ${#born} == 0 )); then
+          new_today=0
+          mod_today=1
+        fi
+      fi
+
+      local -a keep=()
+      integer i
+      for (( i = 1; i <= ${#selected}; i++ )); do
+        entry=$selected[i]
+        [[ -n $name_sub && ${entry:t} != *${name_sub}* ]] && continue
+        [[ -n $pattern  && ${entry:t} != ${~pattern}   ]] && continue
+        (( only_dirs ))  && [[ ! -d $entry ]] && continue
+        (( only_files )) && [[ ! -f $entry ]] && continue
+        (( min_size ))   && (( ${c_size[i]:-0} < min_size ))       && continue
+        (( mod_today ))  && (( ${c_mtime[i]:-0} < midnight ))      && continue
+        (( new_today ))  && (( ${born[$entry]:-0} < midnight ))    && continue
+        keep+=( $entry )
+      done
+      selected=( $keep )
+
+      for entry in $selected; do
+        if [[ -d $entry ]]; then entry_dirs+=( $entry ); else entry_files+=( $entry ); fi
+      done
     else
-      entry_files=( $target/${~pat}(.N) )
-      entry_dirs=(  $target/${~pat}(/N) )
+      if (( all )); then
+        entry_files=( $target/*(D.N) )
+        entry_dirs=(  $target/*(D/N) )
+      else
+        entry_files=( $target/*(.N) )
+        entry_dirs=(  $target/*(/N) )
+      fi
     fi
     entry_dirs=( ${entry_dirs:#*/node_modules} )
 
     if (( ${#entry_files} == 0 && ${#entry_dirs} == 0 )); then
-      if [[ -n $pattern ]]; then
-        print -ru2 -- "dir: nothing matches '$pattern'"
+      if (( filtering )); then
+        print -ru2 -- "dir: nothing matches"
         return 1
       fi
       print -r -- "This folder is empty."
@@ -194,12 +328,10 @@ dir() {
     # eza prints nothing when given no path operand and stdin is not a tty, so
     # every code path below passes an explicit operand.
     local -a targets
-    if [[ -n $pattern ]]; then
-      if (( all )); then
-        targets=( $target/${~pat}(DN) )
-      else
-        targets=( $target/${~pat}(N) )
-      fi
+    local wd=''
+    if (( filtering )); then
+      targets=( ${selected:t} )
+      wd=$target
       # Without this eza descends into every matched directory and prints
       # group headers instead of listing the matches as rows.
       (( depth == 0 )) && eza_args+=( --treat-dirs-as-files )
@@ -209,27 +341,18 @@ dir() {
 
     # --------------------------------------------------------------- listing
     if (( ! badges )); then
-      eza $eza_args --time-style=long-iso -- $targets || return 1
+      dir::run_eza "$wd" $eza_args --time-style=long-iso -- $targets || return 1
     else
       local raw
-      raw=$(eza $eza_args --time-style="+${DIR_SEP}%s${DIR_SEP}%Y-%m-%d %H:%M" -- $targets 2>/dev/null)
+      raw=$(dir::run_eza "$wd" $eza_args --time-style="+${DIR_SEP}%s${DIR_SEP}%Y-%m-%d %H:%M" -- $targets 2>/dev/null)
       integer rc=$?
       local -a lines=( "${(@f)raw}" )
 
       if (( rc != 0 || ${#lines} == 0 )); then
         # Older eza, or one that rejects a chrono +FORMAT: fall back to a
         # plain listing and simply go without badges.
-        eza $eza_args --time-style=long-iso -- $targets || return 1
+        dir::run_eza "$wd" $eza_args --time-style=long-iso -- $targets || return 1
       else
-        # Calendar-day boundaries, not "86400 seconds ago". strftime -r goes
-        # through mktime, so both are correct across a DST change.
-        integer now=$EPOCHSECONDS midnight=0 ymidnight=0
-        local day
-        strftime -s day '%Y-%m-%d' $now
-        strftime -rs midnight '%Y-%m-%d %H:%M:%S' "$day 00:00:00"
-        strftime -s day '%Y-%m-%d' $(( now - 86400 ))
-        strftime -rs ymidnight '%Y-%m-%d %H:%M:%S' "$day 00:00:00"
-
         local B_NOW=$'\e[38;5;196;107m\e[1m JUST NOW \e[0m'
         local B_TODAY=$'\e[38;5;226;40m\e[1m TODAY \e[0m'
         local B_YEST=$'\e[38;5;244;107m\e[1m YESTERDAY \e[0m'

@@ -72,29 +72,58 @@ alias dir="~/repos/dir/dir"
 
 ## Usage
 
+### Filters
+
+The common cases are bare words — no dashes, no flags to remember:
+
+| Word | Shows |
+|---|---|
+| `h` | only hidden entries |
+| `d` | only folders |
+| `f` | only files |
+| `n` | only entries created today |
+| `m` | only entries modified today |
+| `500k` `1m` `2g` | only entries larger than that (`k`/`m`/`g`, powers of 1024) |
+| anything else | only names containing that word |
+
+They combine in any order, ANDed together:
+
+```bash
+dir h                # hidden entries
+dir d                # folders
+dir 10m              # anything over 10 MiB
+dir d 10m            # folders over 10 MiB
+dir f n              # files created today
+dir h config         # hidden entries whose name contains 'config'
+dir config h         # identical — order never matters
 ```
-dir [OPTIONS] [PATH]
+
+### Options
+
+```
+dir [OPTIONS] [FILTER...] [PATH]
 
   -L, --level DEPTH    show a tree DEPTH levels deep (0 = flat, the default)
   -a, --all            include hidden entries, in both the listing and counts
-  -g, --glob PATTERN   list only entries matching PATTERN
+  -g, --glob PATTERN   list only entries whose name matches PATTERN
   -B, --no-badges      disable the relative-time badges
       --no-git         omit the per-file git status column
       --color WHEN     always | never | auto (default: auto)
   -h, --help           show this help
   -V, --version        show the version
-
-PATH defaults to the current directory.
 ```
 
 ```bash
 dir                       # the current directory
 dir ~/repos               # somewhere else
 dir --level 2             # two-level tree
-dir --glob '*.md'         # only markdown files
-dir --all                 # include dotfiles
+dir --glob '*.md'         # a real glob, rather than a substring
 dir --no-badges ~/repos   # plain listing, no badges
 ```
+
+Filter words win over paths, so a directory named `h` is only reachable as
+`dir ./h` or `dir --glob h`. Filters apply to the listed directory only — they
+are not recursive, which matches what the listing shows.
 
 ### Output
 
@@ -120,7 +149,14 @@ old to earn a badge.
 - **Untracked counts come from `git status --porcelain -unormal`**, which collapses an
   untracked directory to a single entry — the same number `git status` shows you.
 - **Hidden entries are all-or-nothing.** `--all` affects the listing and the counts
-  together, so the summary can't contradict what's on screen.
+  together, so the summary can't contradict what's on screen. Note that `h` and `--all`
+  differ: `h` shows *only* hidden entries, `--all` shows them *alongside* the rest.
+- **`n` needs file birth time**, which zsh cannot read natively, so it costs one `stat`
+  call — and only when you actually use it. macOS reports birth time; on systems that
+  don't, `n` falls back to modified-today.
+- **Filtering with `d` over many git repositories is slower than it looks.** Each matched
+  directory becomes a separate operand, and eza opens each one as its own git root —
+  `dir d` across 150 repos takes ~150 ms versus ~9 ms with `--no-git`.
 - `--no-optional-locks` is passed to Git so a listing never rewrites the index underneath
   a running editor or language server.
 

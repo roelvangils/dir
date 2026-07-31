@@ -63,6 +63,29 @@ is longer than a single-space column separator, which is what makes that safe.
 This is the fragile part of the file. `test.zsh` guards it with a byte-identity assertion
 against native `eza --time-style=long-iso` output.
 
+### Bare-word filters
+
+`h d f n m`, a size word (`1m`), and a bare search word are parsed after the flags and
+ANDed together. They are resolved in the shell, not by `eza`:
+
+- The candidate set is one glob (`*(N)`, `*(DN)`, or `.*(N)` for `h`).
+- Size and mtime come from **two** `zstat -A` calls over the whole array, not one per
+  entry.
+- `n` needs birth time, which `zstat` does not expose. It costs a single
+  `stat -f '%B %N'` over the candidate set, and only when `n` is used. If that returns
+  nothing (GNU `stat` has no `-f`), it degrades to modified-today.
+
+The survivors are passed to `eza` as individual operands. Two consequences:
+
+- `--treat-dirs-as-files` is required, or `eza` descends into every matched directory
+  and prints group headers instead of rows.
+- Operands are passed as **bare names** with `eza` run from inside the target directory
+  (`dir::run_eza`), because `eza` echoes each operand exactly as written — passing
+  absolute paths puts the full path on every row.
+- With `--git`, every matched directory becomes its own git root, so `dir d` over a
+  directory of repositories is ~15× slower than `dir d --no-git`. This is inherent to
+  passing N operands; do not "fix" it by dropping `--git` silently.
+
 ### Other performance decisions
 
 - **Slurp, don't stream.** `lines=("${(@f)$(eza …)}")` plus a `for` loop beats
