@@ -513,7 +513,6 @@ dir() {
       # children instead of themselves.
       local -a top=( $target/node_modules/*(/N) ) scoped
       integer modules=0
-      local entry
       for entry in $top; do
         case ${entry:t} in
           .bin|.cache|.package-lock.json|.modules.yaml) ;;
@@ -529,7 +528,8 @@ dir() {
       else
         link='node_modules'
       fi
-      print -r -- "${EM}The ${link} folder (${NUM}${modules}${NUM_OFF} modules, ±${nm_size}) is not listed.${EM_OFF}"
+      local module_word=modules; (( modules == 1 )) && module_word=module
+      print -r -- "${EM}The ${link} folder (${NUM}${modules}${NUM_OFF} ${module_word}, ±${nm_size}) is not listed.${EM_OFF}"
     fi
   } always {
     (( gitfd )) && exec {gitfd}<&-
